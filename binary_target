@@ -1,73 +1,160 @@
 ANN Analysis: PhD Dissertation using VE Data (Binary Target)
 Joseph O'Bruba
-11.20.24
+12.26.24
 Script for importing data from the following spreadsheet:
 % Defining the file names and paths (uncomment one line at a time)
 
-% 1) Two Binary Inputs & a Binary Output
-% data_filename = 'ANN_dataset_binary_kill.xlsx';
+% 1) Two Binary Inputs & a Binary Target Output
+% data_filename = 'C:\Documents\Personal\Grad School\ANN Data\ANN_dataset_binary_kill.xlsx';
 % 2) One Binary Input, One Categorical Input, & a Binary Target Output
-data_filename = 'ANN Data\ANN_dataset_binary_kill_VehA.xlsx';
+data_filename = 'C:\Documents\Personal\Grad School\ANN Data\ANN_dataset_binary_kill_VehA.xlsx';
 
 % Read data from the Excel file
 ann_data = readtable(data_filename);
 
+% Oversample minority target dataset by duplication
+
+% Logical indexing to filter rows where the target column is 1
+minority_input = ann_data(ann_data.KillCategory == 1, :);
+% Use for File No. 1
+% adj_minority_input = [minority_input; minority_input; minority_input];
+% adj_minority_input = [minority_input]; % No Synthetic data (to compare against)
+% Use for File No. 2
+% adj_minority_input = [minority_input; minority_input; minority_input; minority_input;...
+%     minority_input; minority_input; minority_input; minority_input];
+% adj_minority_input = [minority_input]; % No Synthetic data (to compare against)
+adj_minority_input = [minority_input; minority_input; minority_input; minority_input]; % Half as much synthetic data
+
+
+% Putting the Majority and Adjusted Minority rows back together and shuffle their positions
+majority_input = ann_data(ann_data.KillCategory == 0, :);
+adj_ann_input = [majority_input; adj_minority_input];
+% Generating a random permutation of row indices
+rowOrder = randperm(size(adj_ann_input, 1));
+% Shuffle the rows
+adj_ann_input = adj_ann_input(rowOrder, :);
+
 % Seperate File Inputs/Outputs (do one file at a time)
 
 % Use for File No. 1
-% ann_input = table2array(ann_data(:,1:2));
-% ann_target = table2array(ann_data(:,3));
+% ann_input = table2array(adj_ann_input(:,1:2));
+% ann_target = table2array(adj_ann_input(:,3));
 
 % Use for File No. 2
-ann_cat_input = categorical(table2array(ann_data(:,1)));
+ann_cat_input = categorical(table2array(adj_ann_input(:,1)));
 % One-hot encode the categorical data
 cat_input_encoded = onehotencode(ann_cat_input,2);
 % Combine the one-hot encoded categorical data with the binary data
-% Ensure binaryData is a column vector and in the same size as categoricalData
-ann_input = [cat_input_encoded, table2array(ann_data(:,2))];
-ann_target = table2array(ann_data(:,3));
+% Ensure binary data is a column vector and in the same size as categorical data
+ann_input = [cat_input_encoded, table2array(adj_ann_input(:,2))];
+ann_target = table2array(adj_ann_input(:,3));
 
-% Initialize performance array to store results
-iterations = 100;  % Number of iterations
-performances = zeros(iterations, 1);
-% Create an array to store confusion matrices
-confMatAccumulator = zeros(2, 2);
+% Initializing for Leave-One-Out Cross Validation
+tStart = tic;
 
-% Run training 100 times and store performance
-for i = 1:iterations
+% Initialize variables
+numSamples = size(ann_input, 1);
+confMat = zeros(2, 2); 
+confMat_test = zeros(2, 2);
+[numClasses, ~] = size(ann_target);
+
+% Loop for LOOCV
+for i = 1:numSamples
     
-    % Creating a feed-forward shallow neural network
-    hiddenLayerSize = 20; % Number of neurons in the hidden layer
-    net = patternnet([hiddenLayerSize hiddenLayerSize],'trainlm');  % patternet is used b/c inputs are categorical
+    % Create training and testing sets
+    trainIdx = setdiff(1:numSamples, i);
+    testIdx = i;
 
+    train_input = ann_input(trainIdx, :);
+    train_target = ann_target(trainIdx);
+    test_input = ann_input(testIdx,:);
+    test_target = ann_target(testIdx);    
+       
+    % Create a feed-forward shallow neural network
+    hiddenLayerSize = 1; % Adjusting the number of hidden layer neurons (1,2,5,10) 
+    net = patternnet([hiddenLayerSize hiddenLayerSize],'trainbr'); % Adjusting the number of layers (1,2)
+    
     % Set the network to perform classification
-    net.divideParam.trainRatio = 80/100;  % 80% training data
-    net.divideParam.valRatio = 10/100;    % 10% validation data
-    net.divideParam.testRatio = 10/100;   % 10% test data
+    net.divideParam.trainRatio = 70/100;  % 70% training data
+    net.divideParam.valRatio = 0/100;    % 0% validation data
+    net.divideParam.testRatio = 30/100;   % 30% test data
     
-    % Train the network
-    [net, tr] = train(net, ann_input', ann_target');
+    [net, tr] = train(net, train_input', train_target');   
     
-    % Get the performance (e.g., mean squared error)
-    performances(i) = tr.best_perf;
+    % Generate predictions
+    y_train = net(train_input');
     
-    % Test the network on the same data (or use separate test set)
-    ann_output = net(ann_input');
+    % Compute confusion matrix
+    [cMatrix, cm] = confusion(train_target', y_train);
+    confMat(:, :, i) = cm; 
+    train_input_transposed = train_input';
+    train_target_transposed = train_target';
     
-    % Calculate confusion matrix for this iteration
-    cmat = confusionmat(vec2ind(ann_target'), vec2ind(ann_output));    
-    % Accumulate the confusion matrix
-    confMatAccumulator = confMatAccumulator + cmat;
+    % Extract test data
+    testX = train_input_transposed(:, tr.testInd);
+    t_test = train_target_transposed(:, tr.testInd);
+    
+    % Predict outputs for test data
+    y_test = net(testX);    
+    
+    % Compute confusion matrix (test data only)
+    [cMatrix_test, cm_test] = confusion(t_test, y_test);
+    confMat_test(:, :, i) = cm_test; 
+           
 end
 
-% Calculate the average performance
-average_performance = mean(performances);
-disp(['Average Performance over 100 iterations: ', num2str(average_performance)]);
+% % Compute average confusion matrix
+avgCM = mean(confMat, 3)';
+avgCM_test = mean(confMat_test, 3)';
 
-% Average the confusion matrix
-confMatAverage = confMatAccumulator / iterations;
-% Plot the final confusion matrix after averaging
-figure;
-plotconfusion(ann_target', ann_output);
-disp('Average Confusion Matrix over 100 iterations:');
-disp(confMatAverage');
+% Display the average confusion matrix overall accuracy (all data)
+avgCM_accuracy = (avgCM(1,1) + avgCM(2,2)) / sum(avgCM, "all");
+fprintf('Confusion Matrix Accuracy: %0.2f %%', avgCM_accuracy*100);
+
+% Create the confusion chart
+classLabels = ["1:No-Kill", "2:K-Kill"];
+confChart = confusionchart(int32(avgCM), classLabels);
+confChart.Title = 'Avg. Confusion Matrix';
+confChart.ColumnSummary = 'column-normalized'; % Normalize columns
+confChart.DiagonalColor = '0.74,0.90,0.77';
+confChart.OffDiagonalColor = 'red';
+confChart.FontSize = 14;
+
+% Calculate Precision, Recall, and F1 score
+TP = avgCM(2, 2);  % True Positive
+FP = avgCM(1, 2);  % False Positive
+FN = avgCM(2, 1);  % False Negative
+Precision = TP / (TP + FP);
+fprintf('Average Precision: %.4f\n', Precision);
+Recall = TP / (TP + FN);
+fprintf('Average Recall: %.4f\n', Recall);
+F1 = 2 * (Precision * Recall) / (Precision + Recall);
+fprintf('Average F1 Score: %.4f\n', F1);
+
+
+% Display the average confusion matrix overall accuracy (test data)
+avgCM_accuracy_test = (avgCM_test(1,1) + avgCM_test(2,2)) / sum(avgCM_test, "all");
+fprintf('Confusion Matrix Test Data Accuracy: %0.2f %%', avgCM_accuracy_test*100);
+
+% Create the confusion chart (test data)
+% classLabels = ["1:No-Kill", "2:K-Kill"];
+confChart_test = confusionchart(int32(avgCM_test), classLabels);
+confChart_test.Title = 'Avg. Confusion Test Data Matrix';
+confChart_test.ColumnSummary = 'column-normalized'; % Normalize columns
+confChart_test.DiagonalColor = '0.74,0.90,0.77';
+confChart_test.OffDiagonalColor = 'red';
+confChart_test.FontSize = 14;
+
+% Calculate Precision, Recall, and F1 score (test data)
+TP_test = avgCM_test(2, 2);  % True Positive
+FP_test = avgCM_test(1, 2);  % False Positive
+FN_test = avgCM_test(2, 1);  % False Negative
+Precision_test = TP_test / (TP_test + FP_test);
+fprintf('Average Test Data Precision: %.4f\n', Precision_test);
+Recall_test = TP_test / (TP_test + FN_test);
+fprintf('Average Test Data Recall: %.4f\n', Recall_test);
+F1_test = 2 * (Precision_test * Recall_test) / (Precision_test + Recall_test);
+fprintf('Average Test Data F1 Score: %.4f\n', F1_test);
+
+tEnd = toc(tStart);
+fprintf('%f minutes', tEnd/60);
